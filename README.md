@@ -1,4 +1,4 @@
-# Google Analytics 4 Marketing Dimensional model
+# Google Analytics 4 Dimensional model
 
 A comprehensive Dimensional model for Google Analytics 4 (GA4) data using Dataform and BigQuery. This project implements a robust data modeling framework with attribution modeling, source level segmentation, and dimensional model.
 
