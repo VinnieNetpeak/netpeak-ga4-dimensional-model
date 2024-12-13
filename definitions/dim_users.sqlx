@@ -1,0 +1,51 @@
+-- Table: dim_users
+-- Primary Key: user_pseudo_id
+
+config {
+  type: "table",
+  bigquery: {
+    partitionBy: "first_session_date"
+  },
+  description: "Dimension table for users"
+}
+
+WITH user_stats AS (
+SELECT user_pseudo_id,
+       MAX(user_id) AS user_id,
+       max_by(user_ltv.revenue, event_timestamp) AS ltv_revenue,
+       max_by(user_ltv.currency, event_timestamp) AS ltv_currency,
+       MIN(DATE(TIMESTAMP_MICROS(user_first_touch_timestamp))) AS first_session_date,
+       MAX(event_date) AS last_session_date,
+       MAX(is_active_user) AS is_active_user,
+       MIN(user_first_touch_timestamp) AS first_touch,
+       MIN(session_id) AS first_known_session_id,
+       MAX(ga_session_number) AS ga_session_number,
+       MIN_BY(first_source_id, event_timestamp) AS first_source_id
+FROM ${ref("stg_ga4_data")} sd
+WHERE user_pseudo_id IS NOT NULL
+GROUP BY 1),
+
+purchases AS (
+SELECT user_pseudo_id,
+       MIN(event_date) AS first_purchase_date,
+       MAX(event_date) AS last_purchase_date,
+       COUNT(transaction_id) AS purchase_count
+FROM ${ref("fact_purchases")}
+GROUP BY 1)
+
+SELECT us.user_pseudo_id,
+       us.user_id,
+       us.first_session_date,
+       us.last_session_date,
+       us.is_active_user,
+       us.first_touch,
+       first_known_session_id,
+       us.ga_session_number AS max_ga_session_number,
+       p.first_purchase_date,
+       p.last_purchase_date,
+       p.purchase_count,
+       us.ltv_revenue,
+       us.ltv_currency,
+       COALESCE(us.first_source_id, '0') AS first_source_id
+FROM user_stats us
+LEFT JOIN purchases p ON us.user_pseudo_id = p.user_pseudo_id

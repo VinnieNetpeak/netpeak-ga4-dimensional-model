@@ -1,0 +1,85 @@
+config {
+  type: "table",
+  bigquery: {
+    partitionBy: "segment_date"
+  },
+  description: "Staging table for attribution"
+}
+
+js {
+const constants = require("../includes/constants");
+}
+
+WITH base AS (
+SELECT kv.event_name AS key_event_name,
+       kv.event_id AS key_event_id, -- Get historacal sources for each key event withing attribution window
+       kv.user_pseudo_id,
+       kv.session_id,
+       fs.segment_id,
+       fs.event_date AS segment_date,
+       kv.event_date AS key_event_date,
+       fs.segment_begin AS segment_timestamp,
+       kv.event_timestamp AS key_event_timestamp,
+       fs.landing_page_id,
+       fs.source_id
+FROM ${ref("fact_events")} kv
+LEFT JOIN ${ref("fact_segments")} fs ON kv.user_pseudo_id = fs.user_pseudo_id
+AND fs.segment_begin <= kv.event_timestamp -- Get all sources before every key event, then apply attribution window
+AND DATE_DIFF(kv.event_date, fs.event_date, DAY) <= ${constants.ATTRIBUTION_WINDOW_DAYS} -- Count only N days before key event
+AND kv.event_date <= CURRENT_DATE() - 1
+AND fs.event_date <= CURRENT_DATE() - 1
+WHERE kv.is_key_event = TRUE OR kv.is_session_source = TRUE),
+
+non_direct AS (
+SELECT key_event_name,
+       key_event_id,
+       user_pseudo_id,
+       session_id,
+       segment_id,
+       segment_date,
+       key_event_date,
+       segment_timestamp,
+       key_event_timestamp,
+       landing_page_id,
+       source_id
+FROM base
+WHERE source_id <> '0'),
+
+-- Keep only direct sources, if they are the only sources
+-- Save only the last direct segment metadata
+direct AS (
+SELECT key_event_name,
+       key_event_id,
+       user_pseudo_id,
+       max_by(session_id, segment_timestamp) AS session_id,
+       max_by(segment_id, segment_timestamp) AS segment_id,
+       max_by(segment_date, segment_timestamp) AS segment_date,
+       max_by(key_event_date, segment_timestamp) AS key_event_date,
+       max(segment_timestamp) AS segment_timestamp,
+       max(key_event_timestamp) AS key_event_timestamp,
+       max_by(landing_page_id, segment_timestamp) AS landing_page_id,
+       max_by(source_id, segment_timestamp) AS source_id
+FROM base
+WHERE source_id = '0'
+AND key_event_id NOT IN (SELECT key_event_id FROM non_direct)
+GROUP BY 1, 2, 3),
+
+combined AS (
+SELECT * FROM non_direct
+UNION ALL
+SELECT * FROM direct
+)
+
+SELECT DISTINCT key_event_id,
+       key_event_name,
+       user_pseudo_id,
+       session_id,
+       segment_id,
+       segment_date,
+       key_event_date,
+       DATE_DIFF(key_event_date, segment_date, DAY) AS days_before_key_event,
+       segment_timestamp,
+       key_event_timestamp,
+       landing_page_id,
+       source_id
+FROM combined

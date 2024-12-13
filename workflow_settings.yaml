@@ -1,0 +1,5 @@
+dataformCoreVersion: 3.0.8
+defaultProject: gtm-txdvwmd
+defaultLocation: US
+defaultDataset: base_reports_data
+defaultAssertionDataset: base_reports_data_assertions

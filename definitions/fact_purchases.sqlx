@@ -1,0 +1,40 @@
+-- Table: fact_purchases
+-- Primary Key: transaction_id
+-- Foreign Keys: user_pseudo_id, session_id, event_id
+
+config {
+  type: "incremental",
+  bigquery: {
+    partitionBy: "event_date"
+  },
+  description: "Fact table for purchases"
+}
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()} WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  `)}
+}
+
+-- Extremely often purchase event is duplicated in the raw data, we count only last one during the day
+SELECT ecommerce.transaction_id,
+       event_date,
+       max(event_timestamp) AS event_timestamp,
+       max_by(user_pseudo_id, event_timestamp) AS user_pseudo_id,
+       max_by(session_id, event_timestamp) AS session_id,
+       max_by(event_id, event_timestamp) AS purchase_event_id,
+       max_by(ecommerce.total_item_quantity, event_timestamp) AS total_item_quantity,
+       max_by(ecommerce.purchase_revenue_in_usd, event_timestamp) AS purchase_revenue_in_usd,
+       max_by(ecommerce.purchase_revenue, event_timestamp) AS purchase_revenue,
+       max_by(ecommerce.refund_value_in_usd, event_timestamp) AS refund_value_in_usd,
+       max_by(ecommerce.refund_value, event_timestamp) AS refund_value,
+       max_by(ecommerce.shipping_value_in_usd, event_timestamp) AS shipping_value_in_usd,
+       max_by(ecommerce.shipping_value, event_timestamp) AS shipping_value,
+       max_by(ecommerce.tax_value_in_usd, event_timestamp) AS tax_value_in_usd,
+       max_by(ecommerce.tax_value, event_timestamp) AS tax_value,
+       max_by(ecommerce.unique_items, event_timestamp) AS unique_items
+FROM ${ref("stg_ga4_data")}
+WHERE event_name = 'purchase'
+${when(incremental(),
+    `AND event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}
+GROUP BY 1, 2

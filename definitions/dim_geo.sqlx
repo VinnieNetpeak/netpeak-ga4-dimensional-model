@@ -1,0 +1,27 @@
+-- Table: dim_geo
+-- A table that links city, country, continent, region, sub_continent, and metro to a geo_id.
+-- Primary Key: geo_id, 1 row per unique city, country, continent, region, sub_continent, and metro combination.
+
+config {
+  type: "table",
+  description: "Dimension table for geo"
+}
+
+WITH geo_data AS (
+SELECT DISTINCT city,
+                country,
+                continent,
+                region,
+                sub_continent,
+                metro  
+FROM ${ref("raw_ga4_data")}
+WHERE city IS NOT NULL OR country IS NOT NULL OR continent IS NOT NULL OR region IS NOT NULL OR sub_continent IS NOT NULL OR metro IS NOT NULL)
+
+SELECT ${macros.generate_deterministic_id('city', 'country', 'continent', 'region', 'sub_continent', 'metro')} AS geo_id,
+       city,
+       country,
+       continent,
+       region,
+       sub_continent,
+       metro  
+FROM geo_data

@@ -1,0 +1,31 @@
+config {
+  type: "table",
+  description: "Dimension table for items"
+}
+
+js {
+const macros = require("../includes/macros");
+}
+
+WITH base AS (
+SELECT items.item_id,
+       max_by(items.item_name, event_timestamp) AS item_name,
+       max_by(items.item_brand, event_timestamp) AS item_brand,
+       max_by(items.item_category, event_timestamp) AS item_category,
+       max_by(items.item_category2, event_timestamp) AS item_category2,
+       max_by(items.item_category3, event_timestamp) AS item_category3,
+       max_by(items.item_category4, event_timestamp) AS item_category4,
+       max_by(items.item_category5, event_timestamp) AS item_category5
+FROM ${ref("raw_ga4_data")}, UNNEST(items) AS items
+WHERE items.item_id IS NOT NULL
+GROUP BY 1)
+
+SELECT item_id,
+       ${macros.empty_or_not_set_to_null('item_name')},
+       ${macros.empty_or_not_set_to_null('item_brand')},
+       ${macros.empty_or_not_set_to_null('item_category')},
+       ${macros.empty_or_not_set_to_null('item_category2')},
+       ${macros.empty_or_not_set_to_null('item_category3')},
+       ${macros.empty_or_not_set_to_null('item_category4')},
+       ${macros.empty_or_not_set_to_null('item_category5')}
+FROM base

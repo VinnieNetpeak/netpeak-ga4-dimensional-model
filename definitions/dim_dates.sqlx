@@ -1,0 +1,52 @@
+-- Table: dim_dates
+-- Primary Key: date
+
+config {
+  type: "table",
+  description: "Dimension table for dates"
+}
+
+WITH date_range AS (
+  SELECT event_date
+  FROM UNNEST(
+    GENERATE_DATE_ARRAY(
+      (SELECT MIN(event_date) FROM ${ref("stg_ga4_data")}),
+      (SELECT MAX(event_date) FROM ${ref("stg_ga4_data")}),
+      INTERVAL 1 DAY
+    )
+  ) AS event_date
+)
+
+SELECT event_date AS date,
+       EXTRACT(YEAR FROM event_date) AS year,
+       EXTRACT(QUARTER FROM event_date) AS quarter,
+       EXTRACT(MONTH FROM event_date) AS month,
+       EXTRACT(DAY FROM event_date) AS day,
+       EXTRACT(DAYOFYEAR FROM event_date) AS day_of_year,
+       EXTRACT(WEEK FROM event_date) AS week_of_year,
+       FORMAT_DATE("%A", event_date) AS day_name,
+       FORMAT_DATE("%a", event_date) AS day_name_short,
+       FORMAT_DATE("%B", event_date) AS month_name_en,
+       FORMAT_DATE("%b", event_date) AS month_name_short_en,
+       CASE EXTRACT(MONTH FROM event_date)
+       WHEN 1 THEN 'Январь' WHEN 2 THEN 'Февраль' WHEN 3 THEN 'Март'
+       WHEN 4 THEN 'Апрель' WHEN 5 THEN 'Май' WHEN 6 THEN 'Июнь'
+       WHEN 7 THEN 'Июль' WHEN 8 THEN 'Август' WHEN 9 THEN 'Сентябрь'
+       WHEN 10 THEN 'Октябрь' WHEN 11 THEN 'Ноябрь' WHEN 12 THEN 'Декабрь'
+       END AS month_name_ru,
+       CASE EXTRACT(MONTH FROM event_date)
+       WHEN 1 THEN 'Січень' WHEN 2 THEN 'Лютий' WHEN 3 THEN 'Березень'
+       WHEN 4 THEN 'Квітень' WHEN 5 THEN 'Травень' WHEN 6 THEN 'Червень'
+       WHEN 7 THEN 'Липень' WHEN 8 THEN 'Серпень' WHEN 9 THEN 'Вересень'
+       WHEN 10 THEN 'Жовтень' WHEN 11 THEN 'Листопад' WHEN 12 THEN 'Грудень'
+       END AS month_name_uk,
+       CASE EXTRACT(DAYOFWEEK FROM event_date) WHEN 1 THEN 7  -- Sunday becomes 7
+       ELSE EXTRACT(DAYOFWEEK FROM event_date) - 1  -- Other days shift by 1
+       END AS day_of_week,
+       CASE WHEN EXTRACT(DAYOFWEEK FROM event_date) IN (1, 7) THEN TRUE  -- Sunday (1) and Saturday (7)
+       ELSE FALSE END AS is_weekend,
+       DATE_TRUNC(event_date, MONTH) AS first_day_of_month,
+       LAST_DAY(event_date) AS last_day_of_month,
+       DATE_TRUNC(event_date, YEAR) AS first_day_of_year
+FROM date_range
+ORDER BY 1

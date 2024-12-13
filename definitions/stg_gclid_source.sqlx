@@ -1,0 +1,9 @@
+config {
+  type: "view"
+}
+
+SELECT gclid,
+       IF(campaign_id = 'null', NULL, campaign_id) AS campaign_id,
+       IF(campaign_name = 'null', NULL, campaign_name) AS campaign,
+       IF(keyword = 'null', NULL, keyword) AS term
+FROM `${constants.GCLID_SOURCE_TABLE}`

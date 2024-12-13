@@ -1,0 +1,41 @@
+-- Table: fact_events
+-- Primary Key: event_id
+-- Foreign Keys: 
+
+config {
+  type: "incremental",
+  bigquery: {
+    partitionBy: "event_date"
+  },
+  description: "Fact table for events"
+}
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()} WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  `)}
+}
+
+SELECT DISTINCT ga4.event_date,
+                ga4.event_timestamp,
+                ga4.event_name,
+                ga4.user_pseudo_id,
+                ga4.session_id,
+                fs.segment_id,
+                ga4.event_id,
+                ga4.is_key_event,
+                IF(fs.segment_num = 1, TRUE, FALSE) AS is_session_source,
+                ga4.page_id,
+                ga4.page_referrer_id,
+                ga4.geo_id,
+                ga4.platform,
+                ga4.hostname,
+                ga4.device_category,
+                ga4.browser,
+                ga4.browser_version
+FROM ${ref("stg_ga4_data")}  ga4
+LEFT JOIN ${ref("fact_segments")} fs ON ga4.session_id = fs.session_id AND ga4.event_date = fs.event_date
+AND ga4.event_timestamp >= fs.segment_begin
+AND ga4.event_timestamp < fs.segment_end
+${when(incremental(),
+    `AND ga4.event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}

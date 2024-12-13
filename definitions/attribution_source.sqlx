@@ -1,0 +1,88 @@
+-- Table: attribution_source
+-- Output should have same row count as stg_attribution
+config {
+  type: "table",
+  bigquery: {
+    partitionBy: "key_event_date"
+  },
+  description: "Attribution source table"
+}
+
+WITH last_click AS (
+SELECT key_event_id,
+       1 AS last_click_attribution,
+       MAX(segment_timestamp) AS segment_timestamp
+FROM ${ref("stg_attribution")}
+GROUP BY 1, 2),
+
+time_decay AS (
+SELECT segment_date,
+       key_event_id,
+       segment_timestamp,
+       POWER(2, -days_before_key_event / 7) / (SUM(POWER(2, -days_before_key_event / 7)) OVER (PARTITION BY key_event_id)) AS time_decay_attribution
+FROM ${ref("stg_attribution")}
+),
+
+position_based AS (
+-- First and last segment 40% each, remaining 20% uniformly distributed among all segments in between
+WITH number_events AS (
+SELECT segment_date,
+       key_event_id,
+       segment_timestamp,
+       ROW_NUMBER() OVER (PARTITION BY key_event_id ORDER BY segment_timestamp) AS event_number
+FROM ${ref("stg_attribution")}
+ORDER BY 1, 2),
+
+add_total_segments AS (
+SELECT *,
+       MAX(event_number) OVER (PARTITION BY key_event_id ORDER BY segment_timestamp ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total_segments
+FROM number_events)
+
+SELECT segment_date,
+       key_event_id,
+       segment_timestamp,
+       CASE WHEN total_segments = 1 THEN 1
+       WHEN total_segments = 2 THEN 0.5
+       WHEN total_segments > 2 THEN (
+        CASE WHEN event_number = 1 THEN 0.4
+        WHEN event_number = total_segments THEN 0.4
+        ELSE 0.2 / (total_segments -2) END)
+        END AS position_based_attribution
+FROM add_total_segments
+),
+
+total_conversions AS (
+SELECT DISTINCT segment_date,
+                key_event_id,
+                source_id,
+                segment_timestamp,
+                1 AS total_conversions_attribution
+FROM ${ref("stg_attribution")}
+WHERE source_id <> '0'
+)
+
+SELECT b.key_event_id,
+       b.key_event_name,
+       b.user_pseudo_id,
+       b.session_id,
+       b.segment_id,
+       b.segment_timestamp,
+       b.key_event_timestamp,
+       b.segment_date,
+       b.key_event_date,
+       b.days_before_key_event,
+       b.landing_page_id,
+       b.source_id,
+       fp.transaction_id,
+       fp.purchase_revenue_in_usd AS purchase_revenue_in_usd_fp,
+       fp.purchase_revenue AS purchase_revenue_fp,
+       COALESCE(lc.last_click_attribution, 0) AS last_click_attribution,
+       td.time_decay_attribution,
+       pb.position_based_attribution,
+       COALESCE(tc.total_conversions_attribution, 0) AS total_conversions_attribution
+FROM ${ref("stg_attribution")} b
+LEFT JOIN last_click lc on b.key_event_id = lc.key_event_id AND b.segment_timestamp = lc.segment_timestamp AND b.segment_date = DATE(TIMESTAMP_MICROS(lc.segment_timestamp))
+LEFT JOIN time_decay td on b.key_event_id = td.key_event_id AND b.segment_timestamp = td.segment_timestamp AND b.segment_date = td.segment_date
+LEFT JOIN position_based pb on b.key_event_id = pb.key_event_id AND b.segment_timestamp = pb.segment_timestamp AND b.segment_date = pb.segment_date
+LEFT JOIN total_conversions tc on b.key_event_id = tc.key_event_id AND b.segment_timestamp = tc.segment_timestamp AND b.segment_date = tc.segment_date
+LEFT JOIN ${ref("fact_purchases")} fp on b.key_event_id = fp.purchase_event_id AND b.key_event_date = fp.event_date

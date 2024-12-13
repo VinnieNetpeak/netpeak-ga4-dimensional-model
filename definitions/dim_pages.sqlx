@@ -1,0 +1,64 @@
+-- Table: dim_pages
+-- Primary Key: page_id
+
+config {
+  type: "table",
+  description: "Dimension table for pages"
+}
+
+js {
+const macros = require("../includes/macros");
+}
+
+WITH source_data AS (
+-- Get both page_location and page_referrer columns
+SELECT DISTINCT page_location,
+                max_by(page_title, event_date) AS page_title
+FROM ${ref("raw_ga4_data")}
+WHERE page_location IS NOT NULL
+GROUP BY 1
+UNION ALL
+SELECT DISTINCT page_referrer AS page_location,
+       CAST(NULL AS STRING) AS page_title
+FROM ${ref("raw_ga4_data")}
+WHERE page_referrer IS NOT NULL
+),
+
+processed_data AS (
+SELECT page_location,
+       page_title,
+       ${macros.remove_url_params('page_location')} AS page_location_no_utm,
+       ROW_NUMBER() OVER (PARTITION BY page_location ORDER BY page_title IS NOT NULL DESC) AS rn
+  FROM source_data
+),
+
+final_data AS (
+-- Find last non-null page_title for each page_location_no_utm so we have title for referrer pages
+SELECT page_location,
+       page_location_no_utm,
+       page_title,
+       FIRST_VALUE(page_title IGNORE NULLS) OVER (PARTITION BY page_location_no_utm ORDER BY CASE WHEN page_title IS NOT NULL THEN 0 ELSE 1 END, page_location
+       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+       ) AS fallback_title
+FROM processed_data
+WHERE rn = 1
+),
+
+pages AS (
+SELECT ${macros.generate_deterministic_id('page_location')} AS page_id, -- One page_location should always have the same page_id
+       page_location,
+       page_location_no_utm,
+       COALESCE(page_title, fallback_title) AS page_title
+FROM final_data
+ORDER BY page_id)
+
+SELECT page_id,
+       page_location,
+       page_location_no_utm,
+       page_title,
+       NULL AS item_id,
+       REGEXP_EXTRACT(page_location, r'^(?:https?://)?(?:www\.)?([^/]+)') AS hostname,
+       REGEXP_EXTRACT(page_location, r'^(?:https?://)?[^/]+(/[^?]*)') AS path,
+       REGEXP_EXTRACT(page_location, r'\?(.*)$') AS query,
+       CURRENT_TIMESTAMP() AS updated_at
+FROM pages

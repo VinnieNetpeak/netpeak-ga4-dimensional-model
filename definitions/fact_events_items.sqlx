@@ -1,0 +1,46 @@
+-- Table: fact_evemnts_items
+-- Foreign Keys: event_id, item_id
+
+config {
+  type: "incremental",
+  bigquery: {
+    partitionBy: "event_date"
+  },
+  description: "Fact table for events and items"
+}
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()} WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  `)}
+}
+
+SELECT event_date,
+       event_timestamp,
+       event_id,
+       event_name,
+       items.item_id AS item_id,
+       items.item_variant AS item_variant,
+       items.price_in_usd AS price_in_usd,
+       items.price AS price,
+       items.quantity AS quantity,
+       ecommerce.transaction_id,
+       items.item_revenue_in_usd AS item_revenue_in_usd,
+       items.item_revenue AS item_revenue,
+       items.item_refund_in_usd AS item_refund_in_usd,
+       items.item_refund AS item_refund,
+       items.coupon AS coupon,
+       items.affiliation AS affiliation,
+       items.location_id AS location_id,
+       items.item_list_id AS item_list_id,
+       items.item_list_name AS item_list_name,
+       items.item_list_index AS item_list_index,
+       items.promotion_id AS promotion_id,
+       items.promotion_name AS promotion_name,
+       items.creative_name AS creative_name,
+       items.creative_slot AS creative_slot,
+       items.item_params AS item_params
+FROM ${ref("raw_ga4_data")}, UNNEST(items) AS items
+WHERE items.item_id IS NOT NULL
+${when(incremental(),
+    `AND event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}

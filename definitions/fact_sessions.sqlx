@@ -1,0 +1,78 @@
+-- Table: fact_sessions
+-- Primary Key: session_id
+-- Foreign Keys: user_pseudo_id, landing_page_id, source_id, geo_id
+
+-- Main table Key (primary & foreign key) is SESSION_ID column.
+-- I don't know what the real source for the session in GA4 definition is, so I'm using the first source in the session
+config {
+  type: "incremental",
+  bigquery: {
+    partitionBy: "event_date"
+  },
+  description: "Fact table for sessions"
+}
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()} WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  `)}
+}
+
+WITH engagement_time_info AS (
+SELECT event_date,
+       session_id,
+       SUM(engagement_time_msec) AS engagement_time_msec
+FROM ${ref("stg_ga4_data")} 
+WHERE engagement_time_msec IS NOT NULL
+${when(incremental(),
+    `AND event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}
+GROUP BY 1, 2
+),
+
+session_data AS (
+SELECT event_date,
+       user_pseudo_id,
+       session_id,
+       min_by(event_id, event_timestamp) AS event_id,
+       min_by(ga_session_number, event_timestamp) AS ga_session_number,
+       min_by(platform, event_timestamp) AS platform,
+       min_by(hostname, event_timestamp) AS hostname,
+       min_by(device_category, event_timestamp) AS device_category,
+       min_by(browser, event_timestamp) AS browser,
+       min_by(browser_version, event_timestamp) AS browser_version,
+       min_by(geo_id, event_timestamp) AS geo_id,
+       min(event_timestamp) AS session_start,
+       max(event_timestamp) AS session_end,
+       max(session_engaged) AS session_engaged,
+       max(is_key_event) AS has_key_events,
+       max(is_active_user) AS is_active_user
+FROM ${ref("stg_ga4_data")} stg
+${when(incremental(),
+    `WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}
+GROUP BY 1, 2, 3
+)
+
+SELECT s.event_date,
+       s.user_pseudo_id,
+       s.session_id,
+       s.event_id,
+       s.ga_session_number AS ga_session_num,
+       s.platform,
+       s.hostname,
+       s.device_category,
+       s.browser,
+       s.browser_version,
+       att.landing_page_id,
+       att.source_id,
+       --fseg.source_id,
+       s.geo_id,
+       s.session_start,
+       s.session_end,
+       s.session_engaged,
+       s.has_key_events,
+       s.is_active_user,
+       TIMESTAMP_DIFF(TIMESTAMP_MICROS(s.session_end), TIMESTAMP_MICROS(s.session_start), SECOND) AS session_duration_seconds,
+       COALESCE(et.engagement_time_msec, 0) AS engagement_time_msec
+FROM session_data s
+LEFT JOIN engagement_time_info et USING (event_date, session_id)
+LEFT JOIN ${ref("attribution_source")} att ON s.event_id = att.key_event_id AND s.event_date = att.key_event_date AND att.last_click_attribution = 1 -- Last non direct source

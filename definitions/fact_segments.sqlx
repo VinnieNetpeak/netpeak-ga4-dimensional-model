@@ -1,0 +1,143 @@
+-- Table: fact_segments
+-- Primary Key: segment_id
+-- Foreign Keys: session_id, user_pseudo_id, event_id, page_id, page_referrer_id, geo_id, source_id
+
+config {
+  type: "incremental",
+  bigquery: {
+    partitionBy: "event_date"
+  },
+  description: "Fact table for segments"
+}
+
+-- Segments is a part of session with unique ordered source_id combinations.
+-- Example: During one sessions person came from Direct -> PPC -> SEO, it will be 3 segments.
+-- In case of Direct -> PPC -> Direct, it will be 3 segments (order is important).
+-- In case of Direct -> Direct -> PPC, it will be 2 segments (order is important).
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()} WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  `)}
+}
+
+WITH direct_segments AS (
+-- If a first page_view/screen_view event in a session has empty source/medium, then first segment is '(direct)'.
+-- The ultimate goal is to track real direct entrances, even if they are not counted when doing attribution
+SELECT event_date,
+       user_pseudo_id,
+       session_id,
+       MIN_BY(event_id, event_timestamp) AS event_id,
+       MIN(event_timestamp) AS event_timestamp,
+       MIN_BY(ga_session_number, event_timestamp) AS ga_session_number,
+       MIN_BY(page_referrer_id, event_timestamp) AS page_referrer_id,
+       MIN_BY(page_id, event_timestamp) AS page_id,
+       MIN_BY(source_id, event_timestamp) AS first_source_id
+FROM ${ref("stg_ga4_data")}
+${when(incremental(),
+    `WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}
+GROUP BY 1, 2, 3
+HAVING first_source_id IS NULL),
+
+pre_non_direct AS (
+-- Remove sequential duplicates of utm_combined, thus keeping only real changes of utm_combined during a session.
+SELECT event_date,
+       event_timestamp,
+       user_pseudo_id,
+       session_id,
+       ga_session_number,
+       event_id,
+       page_referrer_id,
+       page_id,
+       source_id,
+       LAG(source_id) OVER 
+          (PARTITION BY event_date, session_id ORDER BY event_timestamp) AS prev_source_id
+FROM ${ref("stg_ga4_data")} 
+WHERE source_id IS NOT NULL
+${when(incremental(),
+    `AND event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}
+),
+
+non_direct_segments AS (
+SELECT *
+FROM pre_non_direct
+WHERE (source_id <> prev_source_id OR prev_source_id IS NULL)),
+
+segments_combined AS (
+SELECT * FROM (
+  SELECT event_date, event_timestamp, user_pseudo_id, session_id, ga_session_number,
+         event_id, page_referrer_id, page_id, source_id
+  FROM non_direct_segments
+  UNION ALL
+  SELECT event_date, event_timestamp, user_pseudo_id, session_id, ga_session_number,
+         event_id, page_referrer_id, page_id, '0' AS source_id
+  FROM direct_segments
+)
+ORDER BY 1, 2
+),
+
+session_ends AS (
+SELECT event_date,
+       session_id,
+       MAX(event_timestamp) AS session_end
+FROM ${ref("stg_ga4_data")}
+${when(incremental(),
+    `WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)} 
+GROUP BY 1, 2),
+
+summary AS (
+SELECT sc.event_date,
+       sc.user_pseudo_id,
+       sc.session_id,
+       ROW_NUMBER() OVER (PARTITION BY sc.session_id ORDER BY sc.event_timestamp) as segment_num,
+       sc.page_referrer_id,
+       sc.page_id AS landing_page_id,
+       sc.source_id,
+       sc.event_timestamp AS segment_begin,
+       LEAD(sc.event_timestamp, 1, cast('inf' as float64)) OVER (PARTITION BY event_date, session_id ORDER BY event_timestamp) AS segment_end
+FROM segments_combined sc),
+
+final AS (
+SELECT s.event_date,
+       s.user_pseudo_id,
+       s.session_id,
+       s.segment_num,
+       ${macros.generate_deterministic_id('s.event_date', 's.session_id', 's.segment_num')} AS segment_id,
+       s.page_referrer_id,
+       s.landing_page_id,
+       s.source_id,
+       s.segment_begin,
+       CASE WHEN segment_end = cast('inf' as float64) THEN se.session_end ELSE segment_end END AS segment_end
+FROM summary s
+LEFT JOIN session_ends se ON s.event_date = se.event_date AND s.session_id = se.session_id),
+
+pages_history AS (
+SELECT event_date,
+       event_timestamp,
+       session_id,
+       page_id
+FROM ${ref("stg_ga4_data")}
+WHERE event_name = 'page_view'),
+
+exit_pages AS (
+SELECT f.segment_id,
+       f.event_date,
+       MAX_BY(ph.page_id, ph.event_timestamp) AS exit_page_id
+FROM final f
+INNER JOIN pages_history ph ON ph.session_id = f.session_id
+AND ph.event_date = f.event_date
+AND ph.event_timestamp BETWEEN f.segment_begin AND f.segment_end
+GROUP BY 1, 2
+)
+
+SELECT f.event_date,
+       f.user_pseudo_id,
+       f.session_id,
+       f.segment_num,
+       f.segment_id,
+       f.landing_page_id,
+       f.source_id,
+       f.segment_begin,
+       f.segment_end
+FROM final f
+LEFT JOIN exit_pages ep ON f.event_date = ep.event_date AND f.segment_id = ep.segment_id

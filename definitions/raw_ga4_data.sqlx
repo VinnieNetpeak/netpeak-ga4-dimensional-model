@@ -1,0 +1,333 @@
+config {
+  type: "incremental",
+  bigquery: {
+    partitionBy: "event_date"
+  },
+  description: "Raw GA4 data partitioned by event date"
+}
+
+js {
+const constants = require("../includes/constants");
+const macros = require("../includes/macros");
+}
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()} WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  `)}
+}
+
+WITH raw_events AS (
+SELECT DATE(TIMESTAMP_TRUNC(TIMESTAMP_MICROS(event_timestamp + (${constants.UTC_OFFSET_HOURS} * 60 * 60 * 1000000)), DAY)) AS event_date,
+       event_timestamp + (${constants.UTC_OFFSET_HOURS} * 60 * 60 * 1000000) AS event_timestamp,
+       event_name,
+       COALESCE(user_pseudo_id, 'NA') AS user_pseudo_id, --  COALESCE is there on purpose, NULL while JOINing tables would cause an unexpected behaviour
+       LAST_VALUE(COALESCE(user_id, 'NA')) OVER (PARTITION BY user_pseudo_id ORDER BY event_timestamp) AS user_id,
+       COALESCE((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'), 0) AS ga_session_id,
+       COALESCE((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_number'), 1) AS ga_session_number,
+       IF((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1', TRUE, FALSE) AS session_engaged,
+       (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec') AS engagement_time_msec,
+       (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_referrer') AS page_referrer,
+       IF((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'ignore_referrer') = 'true', TRUE, FALSE) AS ignore_referrer,
+       (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_location,
+       (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title') AS page_title,
+       geo.continent AS continent,
+       geo.sub_continent AS sub_continent,
+       geo.country AS country,
+       geo.region AS region,
+       geo.city AS city,
+       geo.metro AS metro,
+       platform,
+       device.web_info.hostname,
+       device.category AS device_category,
+       device.mobile_brand_name,
+       device.web_info.browser,
+       device.web_info.browser_version,
+       COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'source'), -- If URL is badly formatted, we try to extract UTM parameters from it
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]utm_source=([^&]+)')) AS source,
+       COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'medium'),
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]utm_medium=([^&]+)')) AS medium,
+       COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'campaign'),
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]utm_campaign=([^&]+)')) AS campaign,
+       COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'content'),
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]utm_content=([^&]+)')) AS content,
+       COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'term'),
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]utm_term=([^&]+)')) AS term,
+       COALESCE((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'campaign_id'),
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]campaign_id=([^&]+)')) AS campaign_id,
+       COALESCE(collected_traffic_source.gclid, REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]gclid=([^&]+)')) AS gclid,
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]fbclid=([^&]+)') AS fbclid,
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]wbraid=([^&]+)') AS wbraid,
+       REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]gBraid=([^&]+)') AS gbraid,
+       COALESCE(collected_traffic_source.dclid, REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]dclid=([^&]+)')) AS dclid,
+       COALESCE(collected_traffic_source.srsltid, REGEXP_EXTRACT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), '[?&]srsltid=([^&]+)')) AS srsltid,
+       traffic_source.source AS first_source,
+       traffic_source.medium AS first_medium,
+       traffic_source.name AS first_campaign,
+       ecommerce,
+       items,
+       user_ltv,
+       app_info,
+       is_active_user,
+       event_previous_timestamp + (${constants.UTC_OFFSET_HOURS} * 60 * 60 * 1000000) AS event_previous_timestamp,
+       privacy_info,
+       user_properties,
+       event_value_in_usd,
+       user_first_touch_timestamp + (${constants.UTC_OFFSET_HOURS} * 60 * 60 * 1000000) AS user_first_touch_timestamp,
+       event_dimensions
+FROM `${constants.GA4_EVENTS_TABLE}`
+WHERE REGEXP_CONTAINS(device.web_info.hostname, r'${constants.DOMAIN_REGEX}')
+${when(incremental(),
+    `AND _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d',DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY)) AND FORMAT_DATE('%Y%m%d',DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))`)}
+AND event_name NOT IN (
+     ${constants.BANNED_EVENTS.map(event => `'${event}'`).join(',\n     ')})
+),
+
+fix_data AS (
+SELECT event_date,
+       event_timestamp,
+       event_name,
+       user_pseudo_id,
+       user_id,
+       ga_session_id,
+       ga_session_number,
+       MAX(session_engaged) OVER (PARTITION BY event_date, user_pseudo_id, ga_session_id) AS session_engaged,
+       engagement_time_msec,
+       page_referrer,
+       ignore_referrer,
+       page_location,
+       page_title,
+       continent,
+       sub_continent,
+       country,
+       region,
+       city,
+       metro,
+       platform,
+       hostname,
+       device_category,
+       mobile_brand_name,
+       browser,
+       browser_version,
+       IF(ignore_referrer, NULL, source) AS source,
+       IF(ignore_referrer, NULL, medium) AS medium,
+       IF(ignore_referrer, NULL, campaign) AS campaign,
+       IF(ignore_referrer, NULL, content) AS content,
+       IF(ignore_referrer, NULL, term) AS term,
+       IF(ignore_referrer, NULL, campaign_id) AS campaign_id,
+       gclid,
+       fbclid,
+       wbraid,
+       gbraid,
+       dclid,
+       srsltid,
+       first_source,
+       first_medium,
+       first_campaign,
+       ecommerce,
+       items,
+       user_ltv,
+       app_info,
+       is_active_user,
+       event_previous_timestamp,
+       privacy_info,
+       user_properties,
+       event_value_in_usd,
+       user_first_touch_timestamp,
+       event_dimensions
+FROM raw_events),
+
+item_id_link_to_url AS ( -- This is a helper table to link item_id to page_location
+SELECT page_location,
+       max_by(items.item_id, event_timestamp) AS item_id,
+FROM fix_data, UNNEST(items) AS items
+WHERE event_name IN ('view_item')
+GROUP BY 1
+),
+
+-- If you want to add any further processing, do it here
+-- Currently, we only fix the source and medium, add the session_id and add item_id to each page_location
+gclid_and_session_id_fix AS (
+SELECT event_date,
+       event_timestamp,
+       event_name,
+       user_pseudo_id,
+       user_id,
+       ga_session_id,
+       ${macros.generate_deterministic_id('user_pseudo_id', 'ga_session_id', 'event_date')} AS session_id,
+       ga_session_number,
+       session_engaged,
+       engagement_time_msec,
+       page_referrer,
+       ignore_referrer,
+       fix_data.page_location,
+       page_title,
+       item_id_link_to_url.item_id,
+       continent,
+       sub_continent,
+       country,
+       region,
+       city,
+       metro,
+       platform,
+       hostname,
+       device_category,
+       mobile_brand_name,
+       browser,
+       browser_version,
+       (CASE 
+       WHEN gclid IS NOT NULL OR wbraid IS NOT NULL OR gbraid IS NOT NULL OR dclid IS NOT NULL OR srsltid IS NOT NULL THEN 'google'
+       WHEN fbclid IS NOT NULL THEN 'facebook'
+       ELSE source END) AS source,
+       (CASE
+       WHEN gclid IS NOT NULL OR wbraid IS NOT NULL OR gbraid IS NOT NULL OR dclid IS NOT NULL OR fbclid IS NOT NULL THEN 'cpc'
+       WHEN srsltid IS NOT NULL THEN 'organic'
+       ELSE medium END) AS medium,
+       CASE WHEN srsltid IS NOT NULL THEN 'Shopping Free Listings' ELSE campaign END AS campaign,
+       content,
+       term,
+       campaign_id,
+       gclid,
+       fbclid,
+       wbraid,
+       gbraid,
+       dclid,
+       srsltid,
+       first_source,
+       first_medium,
+       first_campaign,
+       ecommerce,
+       items,
+       user_ltv,
+       app_info,
+       is_active_user,
+       event_previous_timestamp,
+       privacy_info,
+       user_properties,
+       event_value_in_usd,
+       user_first_touch_timestamp,
+       event_dimensions
+FROM fix_data
+LEFT JOIN item_id_link_to_url ON fix_data.page_location = item_id_link_to_url.page_location),
+
+pre_final AS (
+SELECT event_date,
+       event_timestamp,
+       ${macros.generate_deterministic_id('event_date', 'ga_session_id', 'event_name', 'event_timestamp', 'user_pseudo_id', 'page_referrer', 'page_location', 'engagement_time_msec', 'browser_version', 'event_previous_timestamp', 'TO_JSON_STRING(items)')} AS event_id,
+       ${macros.empty_or_not_set_to_null('event_name')},
+       ${macros.empty_or_not_set_to_null('user_pseudo_id')},
+       ${macros.empty_or_not_set_to_null('user_id')},
+       ga_session_id,
+       session_id,
+       ga_session_number,
+       session_engaged,
+       engagement_time_msec,
+       ${macros.empty_or_not_set_to_null('page_referrer')},
+       ignore_referrer,
+       ${macros.empty_or_not_set_to_null('page_location')},
+       ${macros.empty_or_not_set_to_null('page_title')},
+       ${macros.empty_or_not_set_to_null('continent')},
+       ${macros.empty_or_not_set_to_null('sub_continent')},
+       ${macros.empty_or_not_set_to_null('country')},
+       ${macros.empty_or_not_set_to_null('region')},
+       ${macros.empty_or_not_set_to_null('city')},
+       ${macros.empty_or_not_set_to_null('metro')},
+       ${macros.empty_or_not_set_to_null('platform')},
+       ${macros.empty_or_not_set_to_null('hostname')},
+       ${macros.empty_or_not_set_to_null('device_category')},
+       ${macros.empty_or_not_set_to_null('mobile_brand_name')},
+       ${macros.empty_or_not_set_to_null('browser')},
+       ${macros.empty_or_not_set_to_null('browser_version')},
+       ${macros.empty_or_not_set_to_null('source')},
+       ${macros.empty_or_not_set_to_null('medium')},
+       ${macros.empty_or_not_set_to_null('campaign')},
+       ${macros.empty_or_not_set_to_null('content')},
+       ${macros.empty_or_not_set_to_null('term')},
+       ${macros.empty_or_not_set_to_null('campaign_id')},
+       ${macros.empty_or_not_set_to_null('gclid')},
+       ${macros.empty_or_not_set_to_null('fbclid')},
+       ${macros.empty_or_not_set_to_null('wbraid')},
+       ${macros.empty_or_not_set_to_null('gbraid')},
+       ${macros.empty_or_not_set_to_null('dclid')},
+       ${macros.empty_or_not_set_to_null('srsltid')},
+       ${macros.empty_or_not_set_to_null('first_source')},
+       ${macros.empty_or_not_set_to_null('first_medium')},
+       ${macros.empty_or_not_set_to_null('first_campaign')},
+       ecommerce,
+       items,
+       user_ltv,
+       app_info,
+       is_active_user,
+       event_previous_timestamp,
+       privacy_info,
+       user_properties,
+       event_value_in_usd,
+       user_first_touch_timestamp,
+       event_dimensions
+FROM gclid_and_session_id_fix
+),
+
+final AS (
+SELECT event_date,
+       CASE
+       WHEN event_name IN ('first_open', 'first_visit', 'app_remove') THEN event_timestamp - 200
+       WHEN event_name IN ('page_view', 'screen_view') THEN event_timestamp - 100
+       WHEN event_name IN ('session_start') THEN event_timestamp - 190
+       ELSE event_timestamp - 45
+       END AS event_timestamp,
+       event_id,
+       event_name,
+       user_pseudo_id,
+       user_id,
+       ga_session_id,
+       session_id,
+       ga_session_number,
+       session_engaged,
+       engagement_time_msec,
+       page_referrer,
+       ignore_referrer,
+       page_location,
+       page_title,
+       continent,
+       sub_continent,
+       country,
+       region,
+       city,
+       metro,
+       platform,
+       hostname,
+       device_category,
+       mobile_brand_name,
+       browser,
+       browser_version,
+       pf.source AS source,
+       pf.medium AS medium,
+       COALESCE(gc.campaign, pf.campaign) AS campaign, -- replce campaign name with name from gclid
+       COALESCE(gc.campaign_id, pf.campaign_id) AS campaign_id, -- replce campaign id with id from gclid
+       pf.content AS content,
+       COALESCE(gc.term, pf.term) AS term,
+       pf.gclid,
+       fbclid,
+       wbraid,
+       gbraid,
+       dclid,
+       srsltid,
+       first_source,
+       first_medium,
+       first_campaign,
+       ecommerce,
+       items,
+       user_ltv,
+       app_info,
+       is_active_user,
+       event_previous_timestamp,
+       privacy_info,
+       user_properties,
+       event_value_in_usd,
+       user_first_touch_timestamp,
+       event_dimensions
+FROM pre_final pf
+LEFT JOIN ${ref("stg_gclid_source")} AS gc ON pf.gclid = gc.gclid
+)
+
+SELECT DISTINCT * FROM final

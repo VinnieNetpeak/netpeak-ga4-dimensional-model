@@ -1,0 +1,46 @@
+config {
+  type: "incremental",
+  bigquery: {
+    partitionBy: "event_date"
+  },
+  description: "Staging table for pages data"
+}
+
+js {
+const macros = require("../includes/macros");
+}
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()} WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  `)}
+}
+
+WITH base AS (
+SELECT event_date,
+       page_location
+FROM ${ref("raw_ga4_data")}
+WHERE page_location IS NOT NULL
+${when(incremental(),
+    `AND event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}
+UNION ALL
+SELECT event_date,
+       page_referrer AS page_location
+FROM ${ref("raw_ga4_data")}
+WHERE page_referrer IS NOT NULL
+${when(incremental(),
+    `AND event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}
+),
+
+interm AS (
+SELECT DISTINCT event_date,
+       page_location
+FROM base
+)
+
+SELECT interm.event_date,
+       interm.page_location,
+       pages.page_id
+FROM interm
+LEFT JOIN ${ref("dim_pages")} pages ON interm.page_location = pages.page_location
+OR (interm.page_location IS NULL AND pages.page_location IS NULL)

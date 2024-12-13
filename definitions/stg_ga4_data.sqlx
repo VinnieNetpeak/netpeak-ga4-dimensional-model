@@ -1,0 +1,96 @@
+config {
+  type: "incremental",
+  bigquery: {
+    partitionBy: "event_date"
+  },
+  description: "Staging table for GA4 data"
+}
+
+js {
+const macros = require("../includes/macros");
+}
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()} WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  `)}
+}
+
+SELECT ga4_raw.event_date,
+       event_timestamp,
+       event_name,
+       user_pseudo_id,
+       user_id,
+       ga_session_id,
+       session_id,
+       ga_session_number,
+       event_id,
+       CASE WHEN event_name IN (${macros.join_array(constants.KEY_EVENTS, "'")})
+       THEN TRUE ELSE FALSE END AS is_key_event,
+       session_engaged,
+       engagement_time_msec,
+       ga4_raw.page_referrer,
+       ignore_referrer,
+       ga4_raw.page_location,
+       ga4_raw.page_title,
+       pages.page_id,
+       pages_ref.page_id AS page_referrer_id,
+       geo_data.geo_id,
+       platform,
+       hostname,
+       device_category,
+       mobile_brand_name,
+       browser,
+       browser_version,
+       sources.source_id,
+       ga4_raw.source,
+       ga4_raw.medium,
+       ga4_raw.campaign,
+       ga4_raw.content,
+       ga4_raw.term,
+       ga4_raw.campaign_id,
+       first_sources.source_id AS first_source_id,
+       gclid,
+       fbclid,
+       wbraid,
+       gbraid,
+       dclid,
+       srsltid,
+       first_source,
+       first_medium,
+       first_campaign,
+       ecommerce,
+       user_ltv,
+       app_info,
+       is_active_user,
+       user_properties,
+       event_value_in_usd,
+       user_first_touch_timestamp,
+       event_dimensions
+FROM ${ref("raw_ga4_data")} ga4_raw
+LEFT JOIN ${ref("dim_geo")} geo_data
+ON (ga4_raw.continent = geo_data.continent OR (ga4_raw.continent IS NULL AND geo_data.continent IS NULL))
+AND (ga4_raw.sub_continent = geo_data.sub_continent OR (ga4_raw.sub_continent IS NULL AND geo_data.sub_continent IS NULL))
+AND (ga4_raw.country = geo_data.country OR (ga4_raw.country IS NULL AND geo_data.country IS NULL))
+AND (ga4_raw.region = geo_data.region OR (ga4_raw.region IS NULL AND geo_data.region IS NULL))
+AND (ga4_raw.city = geo_data.city OR (ga4_raw.city IS NULL AND geo_data.city IS NULL))
+AND (ga4_raw.metro = geo_data.metro OR (ga4_raw.metro IS NULL AND geo_data.metro IS NULL))
+LEFT JOIN ${ref("dim_sources")} sources 
+ON (ga4_raw.source = sources.source OR (ga4_raw.source IS NULL AND sources.source IS NULL))
+AND (ga4_raw.medium = sources.medium OR (ga4_raw.medium IS NULL AND sources.medium IS NULL))
+AND (ga4_raw.campaign = sources.campaign OR (ga4_raw.campaign IS NULL AND sources.campaign IS NULL))
+AND (ga4_raw.content = sources.content OR (ga4_raw.content IS NULL AND sources.content IS NULL))
+AND (ga4_raw.term = sources.term OR (ga4_raw.term IS NULL AND sources.term IS NULL))
+AND (ga4_raw.campaign_id = sources.campaign_id OR (ga4_raw.campaign_id IS NULL AND sources.campaign_id IS NULL))
+LEFT JOIN ${ref("dim_sources")} first_sources 
+ON (ga4_raw.first_source = first_sources.source OR (ga4_raw.first_source IS NULL AND first_sources.source IS NULL))
+AND (ga4_raw.first_medium = first_sources.medium OR (ga4_raw.first_medium IS NULL AND first_sources.medium IS NULL))
+AND (ga4_raw.first_campaign = first_sources.campaign OR (ga4_raw.first_campaign IS NULL AND first_sources.campaign IS NULL))
+AND (ga4_raw.content = first_sources.content OR (ga4_raw.content IS NULL AND first_sources.content IS NULL))
+AND (ga4_raw.term = first_sources.term OR (ga4_raw.term IS NULL AND first_sources.term IS NULL))
+LEFT JOIN ${ref("stg_pages_data")} pages ON (ga4_raw.page_location = pages.page_location 
+OR (ga4_raw.page_location IS NULL AND pages.page_location IS NULL)) AND ga4_raw.event_date = pages.event_date
+LEFT JOIN ${ref("stg_pages_data")} pages_ref ON (ga4_raw.page_referrer = pages_ref.page_location 
+OR (ga4_raw.page_referrer IS NULL AND pages_ref.page_location IS NULL)) AND ga4_raw.event_date = pages_ref.event_date
+${when(incremental(),
+    `WHERE ga4_raw.event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)`)}

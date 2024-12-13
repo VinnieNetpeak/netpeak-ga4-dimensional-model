@@ -1,0 +1,88 @@
+-- Table: dim_sources
+-- A table that links source, medium, campaign, content, and term to a source_id.
+-- Primary Key: source_id, 1 row per unique source, medium, campaign, content, and term combination.
+
+-- Input: source, medium, campaign, content, term columns
+-- Output: source_id, source, medium, campaign, content, term, channel_grouping columns
+
+-- How it works:
+-- 1. Get unique source, medium, campaign, content, and term combinations from raw_ga4_data.
+-- 2. Assign a unique source_id to each of them.
+-- 3. Assign a channel grouping to each row.
+
+-- ID = 0 for (direct) source and (none) medium.
+
+config {
+  type: "table",
+  description: "Dimension table for sources"
+}
+
+WITH sources_data AS (
+SELECT DISTINCT source,
+         medium,
+         campaign,
+         content,
+         term,
+         campaign_id
+FROM ${ref("raw_ga4_data")}
+WHERE source IS NOT NULL OR medium IS NOT NULL OR campaign IS NOT NULL OR content IS NOT NULL OR term IS NOT NULL OR campaign_id IS NOT NULL
+UNION ALL
+SELECT DISTINCT first_source AS source,
+         first_medium AS medium,
+         first_campaign AS campaign,
+         'no_data' AS content,
+         'no_data' AS term,
+         'no_data' AS campaign_id
+FROM ${ref("raw_ga4_data")}
+WHERE first_source IS NOT NULL OR first_medium IS NOT NULL OR first_campaign IS NOT NULL
+),
+
+sources_data_distinct AS (
+SELECT source,
+       medium,
+       campaign,
+       IF(content = 'no_data', NULL, content) AS content,
+       IF(term = 'no_data', NULL, term) AS term,
+       IF(campaign_id = 'no_data', NULL, campaign_id) AS campaign_id
+FROM sources_data
+GROUP BY 1, 2, 3, 4, 5, 6
+),
+
+prepared AS (
+SELECT ${macros.generate_deterministic_id('source', 'medium', 'campaign', 'content', 'term', 'campaign_id')} AS source_id,
+       sd.source,
+       sd.medium,
+       sd.campaign,
+       sd.content,
+       sd.term,
+       sd.campaign_id
+FROM sources_data_distinct sd
+UNION ALL
+SELECT CAST(0 AS STRING) AS source_id,
+       '(direct)' AS source,
+       '(none)' AS medium,
+       NULL AS campaign,
+       NULL AS content,
+       NULL AS term,
+       NULL AS campaign_id)
+
+SELECT source_id,
+       source,
+       medium,
+       campaign,
+       content,
+       term,
+       campaign_id,
+       CASE -- Sample code for channel grouping, modify as needed. This code is not in stg_ga4_data for a reason.
+       WHEN source = '(direct)' AND (medium = '(none)' OR medium = '(not set)') THEN 'Direct'
+       WHEN medium = 'organic' AND campaign != 'Shopping Free Listings' THEN 'Organic Search'
+       WHEN medium = 'organic' AND campaign = 'Shopping Free Listings' THEN 'Organic Shopping'
+       WHEN REGEXP_CONTAINS(medium, r'^(cpc|ppc|paid)') THEN 'Paid Search'
+       WHEN REGEXP_CONTAINS(medium, r'^(display|banner|cpm)') THEN 'Display'
+       WHEN medium = 'affiliate' THEN 'Affiliates'  
+       WHEN medium = 'referral' THEN 'Referral'
+       WHEN REGEXP_CONTAINS(medium, r'^(social|social-network|social-media)') THEN 'Social'
+       WHEN medium = 'email' THEN 'Email'
+       ELSE 'Other'
+       END AS channel_grouping
+FROM prepared
